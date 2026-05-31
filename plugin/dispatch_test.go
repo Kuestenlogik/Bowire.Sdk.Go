@@ -44,9 +44,9 @@ func (p *testPlugin) Shutdown(_ context.Context) error {
 
 // Compile-time interface checks.
 var (
-	_ BowirePlugin     = testPlugin{}
-	_ StreamingPlugin  = testPlugin{}
-	_ ShutdownHook     = (*testPlugin)(nil)
+	_ BowirePlugin    = testPlugin{}
+	_ StreamingPlugin = testPlugin{}
+	_ ShutdownHook    = (*testPlugin)(nil)
 )
 
 func mustRawID(t *testing.T, id int) json.RawMessage {
