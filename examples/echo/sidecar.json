@@ -1,0 +1,7 @@
+{
+  "id": "echo",
+  "name": "Echo",
+  "version": "0.1.0",
+  "transport": "stdio",
+  "command": ["./echo"]
+}
