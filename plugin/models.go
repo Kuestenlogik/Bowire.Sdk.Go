@@ -80,15 +80,15 @@ func (m MessageInfo) WithDescription(d string) MessageInfo {
 
 // MethodInfo describes a single RPC method.
 type MethodInfo struct {
-	Name             string       `json:"name"`
-	MethodType       MethodType   `json:"methodType"`
-	ClientStreaming  bool         `json:"clientStreaming"`
-	ServerStreaming  bool         `json:"serverStreaming"`
-	InputType        *MessageInfo `json:"inputType,omitempty"`
-	OutputType       *MessageInfo `json:"outputType,omitempty"`
-	Summary          string       `json:"summary,omitempty"`
-	HTTPMethod       string       `json:"httpMethod,omitempty"`
-	HTTPPath         string       `json:"httpPath,omitempty"`
+	Name            string       `json:"name"`
+	MethodType      MethodType   `json:"methodType"`
+	ClientStreaming bool         `json:"clientStreaming"`
+	ServerStreaming bool         `json:"serverStreaming"`
+	InputType       *MessageInfo `json:"inputType,omitempty"`
+	OutputType      *MessageInfo `json:"outputType,omitempty"`
+	Summary         string       `json:"summary,omitempty"`
+	HTTPMethod      string       `json:"httpMethod,omitempty"`
+	HTTPPath        string       `json:"httpPath,omitempty"`
 }
 
 // UnaryMethod builds a unary MethodInfo.
