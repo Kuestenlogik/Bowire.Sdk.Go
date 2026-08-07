@@ -41,3 +41,16 @@ jobs:
             echo "$diff"
             exit 1
           fi
+
+  gate:
+    name: gate
+    needs: [build]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require the matrix to have succeeded
+        run: |
+          if [ "${{ needs.build.result }}" != "success" ]; then
+            echo "matrix job did not succeed: ${{ needs.build.result }}"
+            exit 1
+          fi
