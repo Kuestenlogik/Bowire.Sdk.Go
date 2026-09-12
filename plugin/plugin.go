@@ -5,13 +5,19 @@ import "context"
 // InvokeRequest carries the params of an `invoke` JSON-RPC call.
 // Mirrors the Python/Rust/Node Invoke surface but bundled as a
 // single struct — more idiomatic Go than a 6-arg method.
+//
+// The field names are the host's vocabulary. They used to read
+// Endpoint / Body / Streaming, which matched nothing on the wire: the host
+// sends serverUrl, jsonMessages and showInternalServices, so every invoke
+// reached a plugin with an empty URL and no messages. See the Bowire repo's
+// docs/architecture/sidecar-plugins.md for the contract.
 type InvokeRequest struct {
-	Endpoint  string
-	Service   string
-	Method    string
-	Body      []string
-	Streaming bool
-	Metadata  map[string]string
+	ServerURL            string
+	Service              string
+	Method               string
+	JSONMessages         []string
+	ShowInternalServices bool
+	Metadata             map[string]string
 }
 
 // BowirePlugin is the minimum contract every Bowire sidecar implements.
@@ -23,8 +29,16 @@ type InvokeRequest struct {
 type BowirePlugin interface {
 	ID() string
 	Name() string
-	Discover(ctx context.Context, endpoint string, refresh bool) ([]ServiceInfo, error)
+	Discover(ctx context.Context, serverURL string, showInternalServices bool) ([]ServiceInfo, error)
 	Invoke(ctx context.Context, req InvokeRequest) (InvokeResult, error)
+}
+
+// IconPlugin is the optional capability for a protocol-tab icon. The host
+// falls back to a generic plug glyph when a sidecar reports none, which is
+// what every Go plugin did until now — the initialize reply had no field
+// for it at all.
+type IconPlugin interface {
+	IconSvg() string
 }
 
 // StreamingPlugin is the optional capability for server-streaming
@@ -65,5 +79,5 @@ type ChannelHandle interface {
 // ChannelHandle wired to the workbench; the call returns when the
 // channel closes.
 type ChannelPlugin interface {
-	OpenChannel(ctx context.Context, endpoint, service, method string, metadata map[string]string, channel ChannelHandle) error
+	OpenChannel(ctx context.Context, serverURL, service, method string, metadata map[string]string, channel ChannelHandle) error
 }

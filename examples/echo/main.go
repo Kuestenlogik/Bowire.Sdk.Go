@@ -47,8 +47,8 @@ func (echoPlugin) Discover(_ context.Context, _ string, _ bool) ([]plugin.Servic
 
 func (echoPlugin) Invoke(_ context.Context, req plugin.InvokeRequest) (plugin.InvokeResult, error) {
 	first := ""
-	if len(req.Body) > 0 {
-		first = req.Body[0]
+	if len(req.JSONMessages) > 0 {
+		first = req.JSONMessages[0]
 	}
 	body, _ := json.Marshal(map[string]string{"echoed": first})
 	return plugin.NewOKResult(string(body)), nil
