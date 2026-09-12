@@ -1,0 +1,33 @@
+version: 2
+
+# Go module + the workflow pins. Nothing watched either until now, which is
+# how this SDK's dependencies aged five weeks past the host contract they
+# implement while CI stayed green.
+#
+# A Go major arrives as a new import path, so Dependabot cannot raise one
+# behind your back; the auto-merge workflow still keeps majors manual.
+
+updates:
+  - package-ecosystem: "gomod"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "sunday"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+    commit-message:
+      prefix: "chore(deps)"
+      include: "scope"
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "sunday"
+    open-pull-requests-limit: 3
+    labels:
+      - "dependencies"
+      - "github-actions"
+    commit-message:
+      prefix: "chore(actions)"
