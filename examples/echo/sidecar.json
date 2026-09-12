@@ -1,7 +1,11 @@
 {
-  "id": "echo",
-  "name": "Echo",
-  "version": "0.1.0",
+  "packageId": "Kuestenlogik.Bowire.Sidecar.EchoGo",
+  "protocol": {
+    "id": "echo",
+    "name": "Echo (Go)"
+  },
+  "executable": "echo",
   "transport": "stdio",
-  "command": ["./echo"]
+  "envPrefix": "BOWIRE_",
+  "version": "0.1.0"
 }

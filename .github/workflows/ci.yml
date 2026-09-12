@@ -54,9 +54,56 @@ jobs:
           echo "$out"
           echo "$out" | grep -q '"protocolVersion":1'
 
+  # Against the real host, not a test double. Every contract defect this SDK
+  # carried — discover params nothing sends, a reply envelope the host reads as
+  # "no services", a self-minted streamId, a manifest the installer rejects for
+  # want of protocol.id — was invisible to a suite that only ever talked to
+  # itself. This job does what an operator does: install the published Bowire
+  # CLI, install the example as a sidecar plugin, and ask it to discover.
+  # `bowire discover` exits 0 only when a plugin actually returned a service,
+  # so the exit code is the assertion.
+  e2e:
+    name: e2e against Bowire
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.23"
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "10.0.x"
+
+      - name: Install the Bowire CLI
+        run: dotnet tool install --global Kuestenlogik.Bowire.Tool
+
+      # The zip's root has to carry sidecar.json next to the binary its
+      # `executable` names — that is what marks the archive as a sidecar
+      # plugin and what the host spawns.
+      - name: Package the example as a sidecar zip
+        run: |
+          mkdir -p stage
+          go build -o stage/echo ./examples/echo
+          cp examples/echo/sidecar.json stage/
+          cd stage && zip -r ../echo-go.zip . && cd ..
+          unzip -l echo-go.zip
+
+      - name: Install it as a plugin
+        run: |
+          bowire --plugin-dir "$PWD/plugins" plugin install --file echo-go.zip
+          bowire --plugin-dir "$PWD/plugins" plugin list --verbose
+
+      - name: Discover through the real host
+        run: |
+          out=$(bowire --plugin-dir "$PWD/plugins" discover --url "echo@http://localhost:1")
+          echo "$out"
+          echo "$out" | grep -q "EchoService"
+
   gate:
     name: gate
-    needs: [build]
+    needs: [build, e2e]
     if: always()
     runs-on: ubuntu-latest
     steps:
@@ -64,5 +111,9 @@ jobs:
         run: |
           if [ "${{ needs.build.result }}" != "success" ]; then
             echo "matrix job did not succeed: ${{ needs.build.result }}"
+            exit 1
+          fi
+          if [ "${{ needs.e2e.result }}" != "success" ]; then
+            echo "e2e job did not succeed: ${{ needs.e2e.result }}"
             exit 1
           fi
