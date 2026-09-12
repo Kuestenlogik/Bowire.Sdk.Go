@@ -32,18 +32,45 @@ func (ReplyResult) isDispatchResult()    {}
 func (StreamResult) isDispatchResult()   {}
 func (ShutdownResult) isDispatchResult() {}
 
+// The wire shapes the host actually sends. These used to read endpoint /
+// refresh / body / streaming — names this SDK invented — so discover arrived
+// with an empty URL and invoke with no messages, every time, silently.
 type invokeParams struct {
-	Endpoint  string            `json:"endpoint"`
-	Service   string            `json:"service"`
-	Method    string            `json:"method"`
-	Body      []string          `json:"body"`
-	Streaming bool              `json:"streaming"`
-	Metadata  map[string]string `json:"metadata"`
+	StreamID             string            `json:"streamId"`
+	ServerURL            string            `json:"serverUrl"`
+	Service              string            `json:"service"`
+	Method               string            `json:"method"`
+	JSONMessages         []string          `json:"jsonMessages"`
+	ShowInternalServices bool              `json:"showInternalServices"`
+	Metadata             map[string]string `json:"metadata"`
 }
 
 type discoverParams struct {
-	Endpoint string `json:"endpoint"`
-	Refresh  bool   `json:"refresh"`
+	ServerURL            string `json:"serverUrl"`
+	ShowInternalServices bool   `json:"showInternalServices"`
+}
+
+// SidecarProtocolVersion is the sidecar wire-contract version this SDK
+// speaks (#416). A sidecar that advertises none is tolerated as contract v1
+// — with a warning in the host log on every boot; one outside the host's
+// range is refused at the handshake rather than at the first call.
+const SidecarProtocolVersion = 1
+
+// capabilitiesOf reports what this plugin can answer, read off the optional
+// interfaces it implements. The host skips a call whose flag is false.
+//
+// channels is always false: ChannelPlugin exists in this package, but the
+// dispatcher has no openChannel case, so nothing routes to it. Advertising
+// the capability would earn a method-not-found for every duplex method an
+// operator opens. Routing it is separate work.
+func capabilitiesOf(p BowirePlugin) map[string]bool {
+	_, streams := p.(StreamingPlugin)
+	return map[string]bool{
+		"discover":     true,
+		"invoke":       true,
+		"invokeStream": streams,
+		"channels":     false,
+	}
 }
 
 // Dispatch runs a single JSON-RPC request against `plugin` and
@@ -68,14 +95,24 @@ func Dispatch(ctx context.Context, p BowirePlugin, req Request) DispatchResult {
 		if settings == nil {
 			settings = []PluginSetting{}
 		}
+		iconSvg := ""
+		if ip, ok := p.(IconPlugin); ok {
+			iconSvg = ip.IconSvg()
+		}
 		return ReplyResult{Response: okResponse(id, map[string]interface{}{
-			"id":       p.ID(),
-			"name":     p.Name(),
-			"settings": settings,
+			"id":              p.ID(),
+			"name":            p.Name(),
+			"iconSvg":         iconSvg,
+			"settings":        settings,
+			"protocolVersion": SidecarProtocolVersion,
+			"capabilities":    capabilitiesOf(p),
 		})}
 
 	case "ping":
-		return ReplyResult{Response: okResponse(id, map[string]bool{"pong": true})}
+		// The contract's reply is the bare string. `{"pong": true}` was this
+		// SDK's own invention, and a host using ping as a liveness probe
+		// reads it as a malformed answer.
+		return ReplyResult{Response: okResponse(id, "pong")}
 
 	case "discover":
 		var dp discoverParams
@@ -84,14 +121,16 @@ func Dispatch(ctx context.Context, p BowirePlugin, req Request) DispatchResult {
 				return ReplyResult{Response: errResponse(id, ErrInvalidParams, err.Error())}
 			}
 		}
-		services, err := p.Discover(ctx, dp.Endpoint, dp.Refresh)
+		services, err := p.Discover(ctx, dp.ServerURL, dp.ShowInternalServices)
 		if err != nil {
 			return ReplyResult{Response: errResponse(id, ErrInternal, err.Error())}
 		}
 		if services == nil {
 			services = []ServiceInfo{}
 		}
-		return ReplyResult{Response: okResponse(id, map[string]interface{}{"services": services})}
+		// A bare array: the host reads anything else as "no services, try the
+		// next plugin" and moves on without a word.
+		return ReplyResult{Response: okResponse(id, services)}
 
 	case "invoke":
 		ip, err := parseInvoke(req.Params)
@@ -117,7 +156,14 @@ func Dispatch(ctx context.Context, p BowirePlugin, req Request) DispatchResult {
 		if err != nil {
 			return ReplyResult{Response: errResponse(id, ErrInternal, err.Error())}
 		}
-		streamID := newStreamID()
+		// The host mints the id and subscribes to it *before* sending the
+		// request, so a self-minted one publishes every frame into a channel
+		// nobody reads — which is how streaming looked empty rather than
+		// broken. newStreamID stays for a caller that omits it.
+		streamID := ip.StreamID
+		if streamID == "" {
+			streamID = newStreamID()
+		}
 		return StreamResult{
 			Ack:      okResponse(id, map[string]string{"streamId": streamID}),
 			StreamID: streamID,
@@ -136,8 +182,8 @@ func parseInvoke(raw json.RawMessage) (invokeParams, error) {
 			return ip, err
 		}
 	}
-	if ip.Body == nil {
-		ip.Body = []string{}
+	if ip.JSONMessages == nil {
+		ip.JSONMessages = []string{}
 	}
 	if ip.Metadata == nil {
 		ip.Metadata = map[string]string{}
@@ -147,12 +193,12 @@ func parseInvoke(raw json.RawMessage) (invokeParams, error) {
 
 func (ip invokeParams) toRequest() InvokeRequest {
 	return InvokeRequest{
-		Endpoint:  ip.Endpoint,
-		Service:   ip.Service,
-		Method:    ip.Method,
-		Body:      ip.Body,
-		Streaming: ip.Streaming,
-		Metadata:  ip.Metadata,
+		ServerURL:            ip.ServerURL,
+		Service:              ip.Service,
+		Method:               ip.Method,
+		JSONMessages:         ip.JSONMessages,
+		ShowInternalServices: ip.ShowInternalServices,
+		Metadata:             ip.Metadata,
 	}
 }
 

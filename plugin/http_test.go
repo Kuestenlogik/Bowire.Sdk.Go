@@ -46,7 +46,7 @@ func TestRunHTTP_POSTRunsUnaryInvokeThroughDispatch(t *testing.T) {
 	handle, base := startTestServer(t)
 	defer func() { _ = handle.Close(context.Background()) }()
 
-	body := bytes.NewReader([]byte(`{"jsonrpc":"2.0","id":1,"method":"invoke","params":{"endpoint":"x","service":"Svc","method":"Echo","body":[],"streaming":false,"metadata":{}}}`))
+	body := bytes.NewReader([]byte(`{"jsonrpc":"2.0","id":1,"method":"invoke","params":{"serverUrl":"x://host","service":"Svc","method":"Echo","jsonMessages":[],"showInternalServices":false,"metadata":{}}}`))
 	resp, err := http.Post(base+"/", "application/json", body)
 	if err != nil {
 		t.Fatalf("POST: %v", err)

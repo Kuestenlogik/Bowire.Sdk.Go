@@ -11,8 +11,9 @@ type testPlugin struct {
 	shutdownCalled bool
 }
 
-func (testPlugin) ID() string   { return "test" }
-func (testPlugin) Name() string { return "Test Plugin" }
+func (testPlugin) ID() string      { return "test" }
+func (testPlugin) Name() string    { return "Test Plugin" }
+func (testPlugin) IconSvg() string { return "<svg/>" }
 
 func (testPlugin) Discover(_ context.Context, _ string, _ bool) ([]ServiceInfo, error) {
 	return []ServiceInfo{NewServiceInfo("Svc").WithMethods(UnaryMethod("M"))}, nil
@@ -23,8 +24,8 @@ func (testPlugin) Invoke(_ context.Context, req InvokeRequest) (InvokeResult, er
 		return InvokeResult{}, errors.New("boom")
 	}
 	first := ""
-	if len(req.Body) > 0 {
-		first = req.Body[0]
+	if len(req.JSONMessages) > 0 {
+		first = req.JSONMessages[0]
 	}
 	return NewOKResult(`{"echoed":"` + first + `"}`), nil
 }
@@ -46,6 +47,7 @@ func (p *testPlugin) Shutdown(_ context.Context) error {
 var (
 	_ BowirePlugin    = testPlugin{}
 	_ StreamingPlugin = testPlugin{}
+	_ IconPlugin      = testPlugin{}
 	_ ShutdownHook    = (*testPlugin)(nil)
 )
 
@@ -81,34 +83,96 @@ func TestDispatch_Initialize_ReturnsIDNameSettings(t *testing.T) {
 	if result["name"] != "Test Plugin" {
 		t.Errorf("want name set, got %v", result["name"])
 	}
+	if result["iconSvg"] != "<svg/>" {
+		t.Errorf("want the plugin icon, got %v", result["iconSvg"])
+	}
 	settings, ok := result["settings"].([]PluginSetting)
 	if !ok || len(settings) != 0 {
 		t.Errorf("want empty settings slice, got %v", result["settings"])
 	}
 }
 
-func TestDispatch_Ping_ReturnsPongTrue(t *testing.T) {
-	r := Dispatch(context.Background(), &testPlugin{}, Request{JSONRPC: "2.0", ID: mustRawID(t, 1), Method: "ping"})
-	reply := r.(ReplyResult)
-	result := reply.Response.Result.(map[string]bool)
-	if !result["pong"] {
-		t.Errorf("want pong=true")
+// #416: without these the host treats the sidecar as legacy contract v1 -- a
+// warning on every boot, and no way to refuse an incompatible sidecar at the
+// handshake instead of at the first call.
+func TestDispatch_Initialize_AdvertisesContractVersionAndCapabilities(t *testing.T) {
+	r := Dispatch(context.Background(), &testPlugin{}, Request{JSONRPC: "2.0", ID: mustRawID(t, 1), Method: "initialize"})
+	result := r.(ReplyResult).Response.Result.(map[string]interface{})
+
+	if result["protocolVersion"] != SidecarProtocolVersion {
+		t.Errorf("want protocolVersion=%d, got %v", SidecarProtocolVersion, result["protocolVersion"])
+	}
+	caps, ok := result["capabilities"].(map[string]bool)
+	if !ok {
+		t.Fatalf("want a capabilities map, got %T", result["capabilities"])
+	}
+	// testPlugin implements StreamingPlugin; nothing routes openChannel.
+	want := map[string]bool{"discover": true, "invoke": true, "invokeStream": true, "channels": false}
+	for k, v := range want {
+		if caps[k] != v {
+			t.Errorf("capability %s: want %v, got %v", k, v, caps[k])
+		}
 	}
 }
 
-func TestDispatch_Discover_ReturnsServicesArray(t *testing.T) {
-	params := mustRaw(t, map[string]interface{}{"endpoint": "x", "refresh": false})
+// A plugin without StreamingPlugin has to say so, or the host round-trips to
+// a method-not-found for every server-streaming method in the tree.
+func TestDispatch_Initialize_CapabilitiesFollowTheOptionalInterfaces(t *testing.T) {
+	r := Dispatch(context.Background(), minimalPlugin{}, Request{JSONRPC: "2.0", ID: mustRawID(t, 1), Method: "initialize"})
+	result := r.(ReplyResult).Response.Result.(map[string]interface{})
+
+	caps := result["capabilities"].(map[string]bool)
+	if caps["invokeStream"] {
+		t.Errorf("a plugin without StreamingPlugin must not advertise invokeStream")
+	}
+	if result["iconSvg"] != "" {
+		t.Errorf("a plugin without IconPlugin reports no icon, got %v", result["iconSvg"])
+	}
+}
+
+// The contract replies with the bare string; the map was this SDK's own
+// invention, and a host using ping as a liveness probe reads it as malformed.
+func TestDispatch_Ping_ReturnsTheBarePongString(t *testing.T) {
+	r := Dispatch(context.Background(), &testPlugin{}, Request{JSONRPC: "2.0", ID: mustRawID(t, 1), Method: "ping"})
+	reply := r.(ReplyResult)
+	if reply.Response.Result != "pong" {
+		t.Errorf("want the bare pong string, got %v", reply.Response.Result)
+	}
+}
+
+// The host sends serverUrl / showInternalServices and reads anything but a
+// bare array as "no services, try the next plugin" -- so the old
+// endpoint/refresh params plus the services envelope discovered nothing, ever.
+func TestDispatch_Discover_ReturnsABareServicesArray(t *testing.T) {
+	params := mustRaw(t, map[string]interface{}{"serverUrl": "x://host", "showInternalServices": false})
 	r := Dispatch(context.Background(), &testPlugin{}, Request{JSONRPC: "2.0", ID: mustRawID(t, 1), Method: "discover", Params: params})
 	reply := r.(ReplyResult)
-	result := reply.Response.Result.(map[string]interface{})
-	services := result["services"].([]ServiceInfo)
+	services, ok := reply.Response.Result.([]ServiceInfo)
+	if !ok {
+		t.Fatalf("want a bare []ServiceInfo, got %T", reply.Response.Result)
+	}
 	if len(services) != 1 {
 		t.Errorf("want 1 service, got %d", len(services))
 	}
 }
 
+// What the plugin receives has to be what the host sent: the params struct
+// read endpoint, so every Discover ran against an empty URL.
+func TestDispatch_Discover_PassesTheServerUrlThrough(t *testing.T) {
+	seen := &urlCapturingPlugin{}
+	params := mustRaw(t, map[string]interface{}{"serverUrl": "x://host", "showInternalServices": true})
+	Dispatch(context.Background(), seen, Request{JSONRPC: "2.0", ID: mustRawID(t, 1), Method: "discover", Params: params})
+
+	if seen.serverURL != "x://host" {
+		t.Errorf("want the URL the host sent, got %q", seen.serverURL)
+	}
+	if !seen.showInternal {
+		t.Errorf("showInternalServices did not arrive")
+	}
+}
+
 func TestDispatch_Invoke_EchoesBody(t *testing.T) {
-	params := mustRaw(t, map[string]interface{}{"method": "Echo", "body": []string{"hi"}})
+	params := mustRaw(t, map[string]interface{}{"method": "Echo", "jsonMessages": []string{"hi"}})
 	r := Dispatch(context.Background(), &testPlugin{}, Request{JSONRPC: "2.0", ID: mustRawID(t, 1), Method: "invoke", Params: params})
 	reply := r.(ReplyResult)
 	result := reply.Response.Result.(InvokeResult)
@@ -135,15 +199,17 @@ func TestDispatch_InvokeErrors_SurfaceAsInternal(t *testing.T) {
 	}
 }
 
-func TestDispatch_InvokeStream_AckPlusIterableFrames(t *testing.T) {
-	params := mustRaw(t, map[string]interface{}{"method": "Watch"})
+func TestDispatch_InvokeStream_KeepsTheHostsStreamID(t *testing.T) {
+	// The host mints the id and subscribes to it before sending the request,
+	// so a self-minted one publishes every frame where nobody is listening.
+	params := mustRaw(t, map[string]interface{}{"streamId": "host-minted-42", "method": "Watch"})
 	r := Dispatch(context.Background(), &testPlugin{}, Request{JSONRPC: "2.0", ID: mustRawID(t, 1), Method: "invokeStream", Params: params})
 	stream, ok := r.(StreamResult)
 	if !ok {
 		t.Fatalf("want StreamResult, got %T", r)
 	}
-	if stream.StreamID == "" {
-		t.Errorf("streamId should be non-empty")
+	if stream.StreamID != "host-minted-42" {
+		t.Errorf("want the streamId the host minted, got %q", stream.StreamID)
 	}
 	ack := stream.Ack.Result.(map[string]string)
 	if ack["streamId"] != stream.StreamID {
@@ -175,6 +241,25 @@ func TestDispatch_UnknownMethod_ReturnsMethodNotFound(t *testing.T) {
 	if reply.Response.Error == nil || reply.Response.Error.Code != ErrMethodNotFound {
 		t.Errorf("want method-not-found error, got %+v", reply.Response.Error)
 	}
+}
+
+// Records what Discover actually received.
+type urlCapturingPlugin struct {
+	serverURL    string
+	showInternal bool
+}
+
+func (urlCapturingPlugin) ID() string   { return "cap" }
+func (urlCapturingPlugin) Name() string { return "Cap" }
+
+func (p *urlCapturingPlugin) Discover(_ context.Context, serverURL string, showInternal bool) ([]ServiceInfo, error) {
+	p.serverURL = serverURL
+	p.showInternal = showInternal
+	return nil, nil
+}
+
+func (urlCapturingPlugin) Invoke(_ context.Context, _ InvokeRequest) (InvokeResult, error) {
+	return InvokeResult{}, nil
 }
 
 // Minimal plugin without optional capabilities — proves InvokeStream
