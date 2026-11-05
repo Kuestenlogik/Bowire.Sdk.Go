@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"io"
 	"os"
+	"sync"
 )
 
 // Run drives `p` over the NDJSON JSON-RPC contract on stdin/stdout
@@ -28,6 +29,7 @@ func runWithIO(ctx context.Context, p BowirePlugin, in io.Reader, out io.Writer)
 	scanner.Buffer(make([]byte, 0, 64*1024), 16*1024*1024)
 
 	writer := newFrameWriter(out)
+	d := NewDispatcher(p, func(n Notification) { _ = writer.write(n) })
 
 	for scanner.Scan() {
 		line := scanner.Bytes()
@@ -41,7 +43,7 @@ func runWithIO(ctx context.Context, p BowirePlugin, in io.Reader, out io.Writer)
 			continue
 		}
 
-		outcome := Dispatch(ctx, p, req)
+		outcome := d.Dispatch(ctx, req)
 
 		switch r := outcome.(type) {
 		case ReplyResult:
@@ -61,22 +63,27 @@ func runWithIO(ctx context.Context, p BowirePlugin, in io.Reader, out io.Writer)
 		}
 	}
 
+	// The host's wire is gone: end the channels still open, so their
+	// OnClose handlers release what they hold.
+	d.CloseChannels()
 	return scanner.Err()
 }
 
-// frameWriter serialises writes to the shared output stream so the
-// background stream-pump can't interleave bytes with the main loop's
-// replies.
+// frameWriter serialises writes to the shared output stream, so the
+// stream pumps and channel frames, which write from goroutines of their
+// own, can't interleave bytes with the main loop's replies.
 type frameWriter struct {
-	out io.Writer
+	mu  sync.Mutex
 	enc *json.Encoder
 }
 
 func newFrameWriter(out io.Writer) *frameWriter {
-	return &frameWriter{out: out, enc: json.NewEncoder(out)}
+	return &frameWriter{enc: json.NewEncoder(out)}
 }
 
 func (w *frameWriter) write(v interface{}) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
 	// json.Encoder.Encode appends '\n' on its own — perfect NDJSON.
 	return w.enc.Encode(v)
 }

@@ -1,4 +1,6 @@
-// Runnable Echo plugin demonstrating the @bowire/plugin Go surface.
+// Runnable Echo plugin demonstrating the Bowire Go SDK surface: a unary
+// method, a server stream, a duplex channel, and settings that change what
+// each of them does.
 //
 // stdio mode (default):
 //
@@ -17,6 +19,7 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 	"syscall"
 
 	"github.com/Kuestenlogik/Bowire.Sdk.Go/plugin"
@@ -27,7 +30,36 @@ type echoPlugin struct{}
 func (echoPlugin) ID() string   { return "echo" }
 func (echoPlugin) Name() string { return "Echo" }
 
-func (echoPlugin) Discover(_ context.Context, _ string, _ bool) ([]plugin.ServiceInfo, error) {
+// Settings are declared here and rendered by the workbench's Settings
+// dialog; their values come back with every call.
+func (echoPlugin) Settings() []plugin.PluginSetting {
+	return []plugin.PluginSetting{
+		plugin.NewSetting("transform", "Transform", "select").
+			WithDescription("What Echo and Chat do to the text before sending it back").
+			WithDefault("none").
+			WithOptions(
+				plugin.SettingOption{Value: "none", Label: "As sent"},
+				plugin.SettingOption{Value: "upper", Label: "Upper case"},
+				plugin.SettingOption{Value: "lower", Label: "Lower case"},
+			),
+		plugin.NewSetting("ticks", "Ticks", "number").
+			WithDescription("How many events Watch streams").
+			WithDefault(3),
+	}
+}
+
+func transform(text string, settings plugin.SettingValues) string {
+	switch settings.String("transform", "none") {
+	case "upper":
+		return strings.ToUpper(text)
+	case "lower":
+		return strings.ToLower(text)
+	default:
+		return text
+	}
+}
+
+func (echoPlugin) Discover(_ context.Context, _ plugin.DiscoverRequest) ([]plugin.ServiceInfo, error) {
 	return []plugin.ServiceInfo{
 		plugin.NewServiceInfo("EchoService").
 			WithDescription("A demo plugin").
@@ -41,6 +73,8 @@ func (echoPlugin) Discover(_ context.Context, _ string, _ bool) ([]plugin.Servic
 					)).
 					WithSummary("Echo a message back"),
 				plugin.ServerStreamingMethod("Watch").WithSummary("Stream tick events"),
+				plugin.BidirectionalMethod("Chat").
+					WithSummary(`Echo every frame back; a frame of {"close":true} ends the channel`),
 			),
 	}, nil
 }
@@ -50,17 +84,42 @@ func (echoPlugin) Invoke(_ context.Context, req plugin.InvokeRequest) (plugin.In
 	if len(req.JSONMessages) > 0 {
 		first = req.JSONMessages[0]
 	}
-	body, _ := json.Marshal(map[string]string{"echoed": first})
+	body, _ := json.Marshal(map[string]string{"echoed": transform(first, req.Settings)})
 	return plugin.NewOKResult(string(body)), nil
 }
 
-func (echoPlugin) InvokeStream(_ context.Context, _ plugin.InvokeRequest) (<-chan string, error) {
-	ch := make(chan string, 3)
-	for i := 0; i < 3; i++ {
+func (echoPlugin) InvokeStream(_ context.Context, req plugin.InvokeRequest) (<-chan string, error) {
+	ticks := req.Settings.Int("ticks", 3)
+	if ticks < 0 {
+		ticks = 0
+	}
+	ch := make(chan string, ticks)
+	for i := 0; i < ticks; i++ {
 		ch <- fmt.Sprintf(`{"tick":%d}`, i)
 	}
 	close(ch)
 	return ch, nil
+}
+
+// OpenChannel wires up a duplex channel and returns; the handle is all the
+// plugin keeps — the SDK routes the host's frames to the right one.
+func (echoPlugin) OpenChannel(_ context.Context, req plugin.ChannelRequest, channel plugin.ChannelHandle) error {
+	channel.OnMessage(func(message string) {
+		if wantsClose(message) {
+			channel.Close()
+			return
+		}
+		body, _ := json.Marshal(map[string]string{"echoed": transform(message, req.Settings)})
+		_ = channel.Send(string(body))
+	})
+	return nil
+}
+
+func wantsClose(message string) bool {
+	var frame struct {
+		Close bool `json:"close"`
+	}
+	return json.Unmarshal([]byte(message), &frame) == nil && frame.Close
 }
 
 func main() {

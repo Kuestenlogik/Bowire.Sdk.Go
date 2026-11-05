@@ -196,14 +196,25 @@ func (r InvokeResult) WithMetadata(md map[string]string) InvokeResult {
 	return r
 }
 
+// SettingOption is one choice of a `select` setting: Value is what the
+// plugin reads back, Label what the Settings dialog shows.
+type SettingOption struct {
+	Value string `json:"value"`
+	Label string `json:"label,omitempty"`
+}
+
 // PluginSetting is a single user-configurable setting the plugin exposes through Settings().
+//
+// Type is the host's vocabulary: "string", "bool", "number" or "select". A
+// select needs Options; without them the dialog has nothing to pick from.
 type PluginSetting struct {
-	Key          string      `json:"key"`
-	Label        string      `json:"label"`
-	Type         string      `json:"type"`
-	DefaultValue interface{} `json:"defaultValue,omitempty"`
-	Description  string      `json:"description,omitempty"`
-	Required     bool        `json:"required"`
+	Key          string          `json:"key"`
+	Label        string          `json:"label"`
+	Type         string          `json:"type"`
+	DefaultValue interface{}     `json:"defaultValue,omitempty"`
+	Description  string          `json:"description,omitempty"`
+	Required     bool            `json:"required"`
+	Options      []SettingOption `json:"options,omitempty"`
 }
 
 // NewSetting builds a PluginSetting with the given key/label/type.
@@ -226,5 +237,11 @@ func (p PluginSetting) WithDescription(d string) PluginSetting {
 // MarkRequired flips the required flag and returns the modified copy.
 func (p PluginSetting) MarkRequired() PluginSetting {
 	p.Required = true
+	return p
+}
+
+// WithOptions appends choices for a `select` setting and returns the modified copy.
+func (p PluginSetting) WithOptions(options ...SettingOption) PluginSetting {
+	p.Options = append(append([]SettingOption{}, p.Options...), options...)
 	return p
 }

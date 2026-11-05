@@ -16,13 +16,16 @@ type HTTPHandle struct {
 	server      *http.Server
 	listener    net.Listener
 	subscribers *subscriberSet
+	dispatcher  *Dispatcher
 }
 
 // Addr returns the actual TCP address the server is listening on.
 func (h *HTTPHandle) Addr() string { return h.listener.Addr().String() }
 
-// Close shuts down the HTTP server and disconnects every SSE subscriber.
+// Close ends every open channel, then shuts down the HTTP server and
+// disconnects every SSE subscriber.
 func (h *HTTPHandle) Close(ctx context.Context) error {
+	h.dispatcher.CloseChannels()
 	h.subscribers.closeAll()
 	return h.server.Shutdown(ctx)
 }
@@ -46,6 +49,7 @@ func RunHTTP(ctx context.Context, p BowirePlugin, host string, port int) (*HTTPH
 	}
 
 	subs := newSubscriberSet()
+	d := NewDispatcher(p, func(n Notification) { broadcastNotification(subs, n) })
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
@@ -53,7 +57,7 @@ func RunHTTP(ctx context.Context, p BowirePlugin, host string, port int) (*HTTPH
 		case http.MethodGet:
 			handleSubscribe(w, r, subs)
 		case http.MethodPost:
-			handlePost(ctx, w, r, p, subs)
+			handlePost(ctx, w, r, d, subs)
 		default:
 			w.Header().Set("Allow", "GET, POST")
 			w.WriteHeader(http.StatusMethodNotAllowed)
@@ -63,7 +67,7 @@ func RunHTTP(ctx context.Context, p BowirePlugin, host string, port int) (*HTTPH
 	server := &http.Server{Handler: mux}
 	go func() { _ = server.Serve(listener) }()
 
-	return &HTTPHandle{server: server, listener: listener, subscribers: subs}, nil
+	return &HTTPHandle{server: server, listener: listener, subscribers: subs, dispatcher: d}, nil
 }
 
 func handleSubscribe(w http.ResponseWriter, r *http.Request, subs *subscriberSet) {
@@ -105,14 +109,14 @@ func handleSubscribe(w http.ResponseWriter, r *http.Request, subs *subscriberSet
 	}
 }
 
-func handlePost(ctx context.Context, w http.ResponseWriter, r *http.Request, p BowirePlugin, subs *subscriberSet) {
+func handlePost(ctx context.Context, w http.ResponseWriter, r *http.Request, d *Dispatcher, subs *subscriberSet) {
 	var req Request
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "invalid JSON", http.StatusBadRequest)
 		return
 	}
 
-	outcome := Dispatch(ctx, p, req)
+	outcome := d.Dispatch(ctx, req)
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
@@ -129,16 +133,13 @@ func handlePost(ctx context.Context, w http.ResponseWriter, r *http.Request, p B
 }
 
 func pumpStreamHTTP(streamID string, stream <-chan string, subs *subscriberSet) {
-	defer func() {
-		end, _ := json.Marshal(Notification{
-			JSONRPC: "2.0",
-			Method:  "$/stream/end",
-			Params:  map[string]string{"streamId": streamID},
-		})
-		subs.broadcast(append(append([]byte("data: "), end...), '\n', '\n'))
-	}()
+	defer broadcastNotification(subs, Notification{
+		JSONRPC: "2.0",
+		Method:  "$/stream/end",
+		Params:  map[string]string{"streamId": streamID},
+	})
 	for message := range stream {
-		data, _ := json.Marshal(Notification{
+		broadcastNotification(subs, Notification{
 			JSONRPC: "2.0",
 			Method:  "$/stream/data",
 			Params: map[string]string{
@@ -146,8 +147,14 @@ func pumpStreamHTTP(streamID string, stream <-chan string, subs *subscriberSet) 
 				"message":  message,
 			},
 		})
-		subs.broadcast(append(append([]byte("data: "), data...), '\n', '\n'))
 	}
+}
+
+// broadcastNotification puts one server-initiated frame on every open SSE
+// stream.
+func broadcastNotification(subs *subscriberSet, n Notification) {
+	data, _ := json.Marshal(n)
+	subs.broadcast(append(append([]byte("data: "), data...), '\n', '\n'))
 }
 
 // subscriber is one open SSE connection. A bounded channel + non-

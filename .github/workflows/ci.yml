@@ -101,6 +101,21 @@ jobs:
           echo "$out"
           echo "$out" | grep -q "EchoService"
 
+      # The CLI has no workspace, so it never sends plugin settings (#4), and
+      # no command of it drives a duplex channel (#3). The workbench does
+      # both: ./e2e starts it headless and goes through the endpoints its UI
+      # uses. Linux only until Kuestenlogik/Bowire#990: on Windows the host looks for a bare
+      # `executable` in the plugin directory without PATHEXT, so `echo` misses
+      # echo.exe there.
+      - name: Settings and channels through the workbench
+        run: |
+          mkdir -p "$RUNNER_TEMP/bowire-e2e"
+          go run ./e2e --bowire bowire --plugin-dir "$PWD/plugins" --work-dir "$RUNNER_TEMP/bowire-e2e"
+
+      - name: Host log
+        if: failure()
+        run: cat "$RUNNER_TEMP/bowire-e2e/host.log" || true
+
   gate:
     name: gate
     needs: [build, e2e]

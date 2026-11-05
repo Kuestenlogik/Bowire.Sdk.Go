@@ -17,7 +17,7 @@ type httpTestPlugin struct{}
 func (httpTestPlugin) ID() string   { return "http-test" }
 func (httpTestPlugin) Name() string { return "HTTP Test" }
 
-func (httpTestPlugin) Discover(_ context.Context, _ string, _ bool) ([]ServiceInfo, error) {
+func (httpTestPlugin) Discover(_ context.Context, _ DiscoverRequest) ([]ServiceInfo, error) {
 	return []ServiceInfo{NewServiceInfo("Svc")}, nil
 }
 

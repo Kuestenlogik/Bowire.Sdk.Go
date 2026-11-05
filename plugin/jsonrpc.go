@@ -39,6 +39,9 @@ const (
 	ErrMethodNotFound = -32601
 	ErrInvalidParams  = -32602
 	ErrInternal       = -32603
+	// ErrChannelGone answers a channel.send or channel.close for a channel
+	// that is closed or was never open; the host reads it as "not sent".
+	ErrChannelGone = -32001
 )
 
 // nullID returns the `null` JSON literal as a RawMessage — used when
