@@ -82,7 +82,56 @@ func run(bowire, pluginDir, workDir string) error {
 	if err := checkChannels(s); err != nil {
 		return fmt.Errorf("%w (host log: %s)", err, wb.logFile)
 	}
+	if err := checkManualEntry(wb.url); err != nil {
+		return fmt.Errorf("%w (host log: %s)", err, wb.logFile)
+	}
 	return nil
+}
+
+// checkManualEntry: the host serves the form the example declares
+// (Kuestenlogik/Bowire#1003). Not workspace-scoped, so no session query. A
+// host before Bowire 2.11 has no ManualEntry service (404); CI installs the
+// latest released tool, so there that is a note until 2.11 is out.
+func checkManualEntry(base string) error {
+	resp, err := http.Get(base + "/api/v1/manual-entry-forms?pageSize=200")
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNotFound {
+		fmt.Println("manual entry: skipped, this host predates Bowire 2.11")
+		return nil
+	}
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("manual-entry forms answered %d", resp.StatusCode)
+	}
+	var body struct {
+		Forms []struct {
+			Protocol  string `json:"protocol"`
+			CallKinds []struct {
+				ID         string `json:"id"`
+				MethodType string `json:"methodType"`
+			} `json:"callKinds"`
+		} `json:"forms"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		return err
+	}
+	for _, f := range body.Forms {
+		if f.Protocol != protocol {
+			continue
+		}
+		var kinds []string
+		for _, k := range f.CallKinds {
+			kinds = append(kinds, k.ID+":"+k.MethodType)
+		}
+		if got := strings.Join(kinds, ","); got != "echo:Unary,watch:ServerStreaming,chat:Duplex" {
+			return fmt.Errorf("the echo form carries the wrong call kinds: %s", got)
+		}
+		fmt.Println("manual entry: the declared form is served")
+		return nil
+	}
+	return errors.New("the host serves no form for echo")
 }
 
 // --- the workbench ---------------------------------------------------------

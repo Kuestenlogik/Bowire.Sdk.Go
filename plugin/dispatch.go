@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"strings"
 )
 
 // DispatchResult is the discriminated outcome of a single inbound
@@ -137,14 +138,29 @@ func (d *Dispatcher) Dispatch(ctx context.Context, req Request) DispatchResult {
 		if ip, ok := p.(IconPlugin); ok {
 			iconSvg = ip.IconSvg()
 		}
-		return ReplyResult{Response: okResponse(id, map[string]interface{}{
+		reply := map[string]interface{}{
 			"id":              p.ID(),
 			"name":            p.Name(),
 			"iconSvg":         iconSvg,
 			"settings":        settings,
 			"protocolVersion": SidecarProtocolVersion,
 			"capabilities":    capabilitiesOf(p),
-		})}
+		}
+		// Kuestenlogik/Bowire#1003 - a form the host would refuse fails the
+		// handshake, naming why, rather than silently never appearing.
+		if mp, ok := p.(ManualEntryPlugin); ok {
+			if form := mp.ManualEntry(); form != nil {
+				if problems := ManualEntryProblems(*form); len(problems) > 0 {
+					return ReplyResult{Response: errResponse(id, ErrInternal,
+						"manualEntry: "+strings.Join(problems, "; "))}
+				}
+				if form.Fields == nil {
+					form.Fields = []ManualField{}
+				}
+				reply["manualEntry"] = form
+			}
+		}
+		return ReplyResult{Response: okResponse(id, reply)}
 
 	case "ping":
 		// The contract's reply is the bare string; a host using ping as a

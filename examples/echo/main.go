@@ -59,6 +59,20 @@ func transform(text string, settings plugin.SettingValues) string {
 	}
 }
 
+// ManualEntry says how the three methods are called by hand, without
+// discovery (Kuestenlogik/Bowire#1003): the workbench renders a form from it.
+func (echoPlugin) ManualEntry() *plugin.ManualEntryForm {
+	return &plugin.ManualEntryForm{
+		CallKinds: []plugin.ManualCallKind{
+			{ID: "echo", Label: "Echo", MethodType: "Unary", Service: "EchoService", Method: "Echo",
+				BodyExample: `{"message":"hello"}`},
+			{ID: "watch", Label: "Watch", MethodType: "ServerStreaming", Service: "EchoService", Method: "Watch"},
+			{ID: "chat", Label: "Chat", MethodType: "Duplex", Service: "EchoService", Method: "Chat",
+				BodyExample: `"hello"`},
+		},
+	}
+}
+
 func (echoPlugin) Discover(_ context.Context, _ plugin.DiscoverRequest) ([]plugin.ServiceInfo, error) {
 	return []plugin.ServiceInfo{
 		plugin.NewServiceInfo("EchoService").

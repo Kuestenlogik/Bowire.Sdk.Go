@@ -113,6 +113,43 @@ the key is absent, or its value does not parse, they return the default
 the plugin declared, then the fallback passed in. `Has` and `Raw` tell
 a set value from a default.
 
+## Hand-entry form
+
+A user can call your plugin without discovery, from the workbench's freeform
+form or Compose, and only your plugin knows what such a call needs. Implement
+`ManualEntry()` (the optional `ManualEntryPlugin` interface). The dispatcher
+puts the form in the `initialize` reply, and the workbench renders a Compose
+form from it and offers exactly these method types in the freeform form
+(Bowire 2.11 or later).
+
+```go
+func (myPlugin) ManualEntry() *plugin.ManualEntryForm {
+	return &plugin.ManualEntryForm{
+		URLPlaceholder: "mybroker://localhost:9000",
+		CallKinds: []plugin.ManualCallKind{
+			{ID: "produce", Label: "Produce", MethodType: "Unary", Service: "{topic}", Method: "produce"},
+			{ID: "consume", Label: "Consume", MethodType: "ServerStreaming", Service: "{topic}", Method: "consume"},
+		},
+		Fields: []plugin.ManualField{
+			{Key: "topic", Label: "Topic", Placement: "template", Required: true},
+			{Key: "key", Label: "Key", CallKinds: []string{"produce"}},
+		},
+	}
+}
+```
+
+- A **call kind** names how it runs: `Unary` is `Invoke`, `ServerStreaming`
+  is `InvokeStream`, and `ClientStreaming` or `Duplex` opens a channel.
+  `Service` and `Method` are templates, in which `{key}` is the value of the
+  field with that key.
+- A **field** with `Placement: "template"` only feeds the templates. The
+  default, `"metadata"`, goes into the call's metadata under its `Key`, which
+  is where `Invoke` reads it.
+- A form the host would refuse fails `initialize`, naming the problem.
+  Examples are an unknown method type, a placeholder no field declares, and a
+  `select` without options. `plugin.ManualEntryProblems(form)` runs the same
+  check. Return `nil` for no form.
+
 ## Duplex channels
 
 A `ChannelPlugin` serves bidirectional methods. `OpenChannel` wires up
