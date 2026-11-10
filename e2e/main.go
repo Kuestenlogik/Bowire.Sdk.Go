@@ -1,6 +1,7 @@
 // Command e2e checks the echo example against the real Bowire workbench.
 //
 //	go run ./e2e --bowire bowire --plugin-dir <dir> --work-dir <dir>
+//	go run ./e2e --transport http --sidecar <built example> --bowire bowire --plugin-dir <dir> --work-dir <dir>
 //
 // `bowire discover` proves a plugin installs and answers, but the CLI has no
 // workspace, so it never sends plugin settings, and no command of it drives
@@ -9,10 +10,19 @@
 // per call (Kuestenlogik/Bowire#693, this repo's #4), and the example's Chat
 // method opened, sent over both ways and closed from each side (#3).
 //
-// The plugin must already be installed into --plugin-dir; the CI job does
-// that with `bowire plugin install`. --work-dir is a scratch directory: the
-// host's log lands there, and it holds the workspace's storage root, so the
-// settings this writes stay out of the operator's ~/.bowire.
+// stdio (the default): the plugin must already be installed into
+// --plugin-dir; the CI job does that with `bowire plugin install`, and the
+// host spawns it.
+//
+// http (#8): the sidecar runs on its own. This starts the built example in
+// HTTP mode on a port the OS picks, installs a sidecar zip whose manifest
+// says "transport": "http" and that "url", asks the CLI to discover, runs
+// the same checks as over stdio, and at the end stops the sidecar while the
+// host is still connected.
+//
+// --work-dir is a scratch directory: the logs land there, and it holds the
+// workspace's storage root, so the settings this writes stay out of the
+// operator's ~/.bowire.
 package main
 
 import (
@@ -29,6 +39,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 )
 
@@ -45,14 +56,22 @@ func main() {
 	bowire := flag.String("bowire", "bowire", "the Bowire executable")
 	pluginDir := flag.String("plugin-dir", "", "the plugin directory the example is installed in")
 	workDir := flag.String("work-dir", "", "a scratch directory")
+	transport := flag.String("transport", "stdio", "stdio (the host spawns the sidecar) or http (it runs on its own)")
+	sidecar := flag.String("sidecar", "", "the built example, for --transport http")
 	flag.Parse()
 	if *pluginDir == "" || *workDir == "" {
 		fail(errors.New("--plugin-dir and --work-dir are required"))
 	}
-	if err := run(*bowire, *pluginDir, *workDir); err != nil {
+	switch {
+	case *transport == "http" && *sidecar == "":
+		fail(errors.New("--transport http needs --sidecar <built example>"))
+	case *transport != "stdio" && *transport != "http":
+		fail(fmt.Errorf("--transport is stdio or http, not %q", *transport))
+	}
+	if err := run(*bowire, *pluginDir, *workDir, *transport, *sidecar); err != nil {
 		fail(err)
 	}
-	fmt.Println("e2e: all checks passed")
+	fmt.Printf("e2e: all %s checks passed\n", *transport)
 }
 
 func fail(err error) {
@@ -60,11 +79,22 @@ func fail(err error) {
 	os.Exit(1)
 }
 
-func run(bowire, pluginDir, workDir string) error {
+func run(bowire, pluginDir, workDir, transport, sidecarBinary string) error {
 	storage := filepath.Join(workDir, "workspace")
 	if err := os.MkdirAll(storage, 0o755); err != nil {
 		return err
 	}
+
+	var sidecar *httpSidecar
+	if transport == "http" {
+		sc, err := installHTTPSidecar(bowire, sidecarBinary, pluginDir, workDir)
+		if err != nil {
+			return err
+		}
+		sidecar = sc
+		defer func() { _, _ = sidecar.stop() }()
+	}
+
 	wb, err := startWorkbench(bowire, pluginDir, workDir)
 	if err != nil {
 		return err
@@ -85,6 +115,63 @@ func run(bowire, pluginDir, workDir string) error {
 	if err := checkManualEntry(wb.url); err != nil {
 		return fmt.Errorf("%w (host log: %s)", err, wb.logFile)
 	}
+	if sidecar != nil {
+		if err := stopHTTPSidecar(sidecar); err != nil {
+			return fmt.Errorf("%w (sidecar log: %s)", err, sidecar.logFile)
+		}
+	}
+	return nil
+}
+
+// installHTTPSidecar starts the example as an http sidecar and installs it
+// the way an operator does: a zip with nothing but the manifest, which
+// points at the sidecar.
+func installHTTPSidecar(bowire, binary, pluginDir, workDir string) (*httpSidecar, error) {
+	sc, err := startHTTPSidecar(binary, workDir)
+	if err != nil {
+		return nil, err
+	}
+	fmt.Println("http sidecar at", sc.url)
+	zipPath := filepath.Join(workDir, "echo-go-http.zip")
+	if err := writeHTTPZip(zipPath, filepath.Join("examples", "echo", "sidecar.json"), sc.url); err != nil {
+		_, _ = sc.stop()
+		return nil, err
+	}
+	steps := [][]string{
+		{"--plugin-dir", pluginDir, "plugin", "install", "--file", zipPath},
+		{"--plugin-dir", pluginDir, "plugin", "list", "--verbose"},
+	}
+	for _, args := range steps {
+		if _, err := bowireCLI(bowire, args...); err != nil {
+			_, _ = sc.stop()
+			return nil, err
+		}
+	}
+	out, err := bowireCLI(bowire, "--plugin-dir", pluginDir, "discover", "--url", serverURL)
+	if err == nil {
+		err = expect(strings.Contains(out, service), "the CLI discovers %s over http", service)
+	}
+	if err != nil {
+		_, _ = sc.stop()
+		return nil, err
+	}
+	return sc, nil
+}
+
+// stopHTTPSidecar: the host does not own an http sidecar, so it has to stop
+// when told to, while the host still holds its SSE stream open. A clean
+// exit is required where the platform has a signal for it.
+func stopHTTPSidecar(sc *httpSidecar) error {
+	code, err := sc.stop()
+	if err != nil {
+		return err
+	}
+	if runtime.GOOS != "windows" {
+		if err := expect(code == 0, "the http sidecar stopped cleanly, exit %d", code); err != nil {
+			return err
+		}
+	}
+	fmt.Printf("http sidecar: stopped with the host still connected (exit %d)\n", code)
 	return nil
 }
 

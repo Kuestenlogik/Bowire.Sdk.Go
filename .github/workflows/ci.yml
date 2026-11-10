@@ -62,9 +62,27 @@ jobs:
   # CLI, install the example as a sidecar plugin, and ask it to discover.
   # `bowire discover` exits 0 only when a plugin actually returned a service,
   # so the exit code is the assertion.
+  #
+  # Both transports (#8): over stdio the host spawns the sidecar; over http
+  # it runs on its own, the host POSTs to it and reads its notifications off
+  # one SSE stream, and ./e2e stops it while the host is still connected.
+  # Windows runs http only until Kuestenlogik/Bowire#990 ships (2.11): over
+  # stdio the host looks for a bare `executable` in the plugin directory
+  # without PATHEXT, so `echo` misses echo.exe there (#7). An http sidecar
+  # has no executable for the host to find.
   e2e:
-    name: e2e against Bowire
-    runs-on: ubuntu-latest
+    name: e2e against Bowire (${{ matrix.os }}, ${{ matrix.transport }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest, transport: stdio }
+          - { os: ubuntu-latest, transport: http }
+          - { os: windows-latest, transport: http }
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/checkout@v4
 
@@ -79,23 +97,32 @@ jobs:
       - name: Install the Bowire CLI
         run: dotnet tool install --global Kuestenlogik.Bowire.Tool
 
+      - name: Scratch directory
+        run: echo "WORK_DIR=$RUNNER_TEMP/bowire-e2e" >> "$GITHUB_ENV"
+
+      - name: Build the example
+        run: |
+          mkdir -p stage "$WORK_DIR"
+          go build -o stage/echo$([ "$RUNNER_OS" = Windows ] && echo .exe) ./examples/echo
+
       # The zip's root has to carry sidecar.json next to the binary its
       # `executable` names — that is what marks the archive as a sidecar
       # plugin and what the host spawns.
       - name: Package the example as a sidecar zip
+        if: matrix.transport == 'stdio'
         run: |
-          mkdir -p stage
-          go build -o stage/echo ./examples/echo
           cp examples/echo/sidecar.json stage/
           cd stage && zip -r ../echo-go.zip . && cd ..
           unzip -l echo-go.zip
 
       - name: Install it as a plugin
+        if: matrix.transport == 'stdio'
         run: |
           bowire --plugin-dir "$PWD/plugins" plugin install --file echo-go.zip
           bowire --plugin-dir "$PWD/plugins" plugin list --verbose
 
       - name: Discover through the real host
+        if: matrix.transport == 'stdio'
         run: |
           out=$(bowire --plugin-dir "$PWD/plugins" discover --url "echo@http://localhost:1")
           echo "$out"
@@ -104,17 +131,19 @@ jobs:
       # The CLI has no workspace, so it never sends plugin settings (#4), and
       # no command of it drives a duplex channel (#3). The workbench does
       # both: ./e2e starts it headless and goes through the endpoints its UI
-      # uses. Linux only until Kuestenlogik/Bowire#990: on Windows the host looks for a bare
-      # `executable` in the plugin directory without PATHEXT, so `echo` misses
-      # echo.exe there.
-      - name: Settings and channels through the workbench
-        run: |
-          mkdir -p "$RUNNER_TEMP/bowire-e2e"
-          go run ./e2e --bowire bowire --plugin-dir "$PWD/plugins" --work-dir "$RUNNER_TEMP/bowire-e2e"
+      # uses. For http it first starts the sidecar, installs a manifest that
+      # points at it and discovers through the CLI.
+      - name: Through the workbench
+        run: >-
+          go run ./e2e --transport ${{ matrix.transport }}
+          --sidecar "$PWD/stage/echo$([ "$RUNNER_OS" = Windows ] && echo .exe)"
+          --bowire bowire --plugin-dir "$PWD/plugins" --work-dir "$WORK_DIR"
 
-      - name: Host log
+      - name: Host and sidecar logs
         if: failure()
-        run: cat "$RUNNER_TEMP/bowire-e2e/host.log" || true
+        run: |
+          cat "$WORK_DIR/host.log" || true
+          cat "$WORK_DIR/sidecar.log" || true
 
   gate:
     name: gate

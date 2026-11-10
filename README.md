@@ -237,6 +237,19 @@ settings are declared and their values reach each call, and the example's
 go run ./e2e --bowire bowire --plugin-dir <dir with the example installed> --work-dir <scratch dir>
 ```
 
+The same checks run over HTTP/SSE. In that mode `e2e` starts the built
+example with `BOWIRE_HTTP_PORT=0` and reads the port off the line it
+prints once it listens. It then installs a manifest with
+`"transport": "http"` and that `url`, discovers through the CLI, and
+stops the sidecar with SIGTERM while the host is still connected:
+
+```bash
+go build -o echo ./examples/echo
+go run ./e2e --transport http --sidecar ./echo --bowire bowire --plugin-dir <empty dir> --work-dir <scratch dir>
+```
+
+CI runs stdio on Linux and http on Linux and Windows.
+
 ## Related
 
 - [Bowire (host)](https://github.com/Kuestenlogik/Bowire)
