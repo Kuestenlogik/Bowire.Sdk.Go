@@ -63,9 +63,11 @@ func runWithIO(ctx context.Context, p BowirePlugin, in io.Reader, out io.Writer)
 		}
 	}
 
-	// The host's wire is gone: end the channels still open, so their
-	// OnClose handlers release what they hold.
-	d.CloseChannels()
+	// The host's wire is gone, and with it the process: end the channels
+	// still open, so their OnClose handlers release what they hold, and
+	// tell the plugin as a `shutdown` would have.
+	d.EndAllSessions()
+	d.RunShutdownHook(ctx)
 	return scanner.Err()
 }
 

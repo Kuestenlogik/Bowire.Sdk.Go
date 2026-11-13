@@ -22,10 +22,14 @@ const (
 // (Bowire.Sdk.Go#3). The host subscribes to that id before it sends
 // `openChannel`, so every frame carries it — a self-minted one would
 // publish into a channel nobody reads.
+//
+// session is the host that opened it: over http only requests of that
+// session reach the channel, and its frames go only to that session.
 type hostChannel struct {
-	id     string
-	notify func(Notification)
-	ended  func(*hostChannel)
+	id      string
+	session string
+	notify  func(Notification)
+	ended   func(*hostChannel)
 
 	mu            sync.Mutex
 	state         channelState
@@ -120,43 +124,61 @@ func (c *hostChannel) end() {
 	}
 }
 
-// channelRegistry holds the open channels of one runtime. Each is reached
-// only by its own id, so frames never cross.
-type channelRegistry struct {
-	notify func(Notification)
-
-	mu       sync.Mutex
-	channels map[string]*hostChannel
+// channelKey names a channel: the id its host minted, within that host's
+// session. Two hosts that mint the same id do not collide, and one host
+// cannot reach another's channel by naming its id.
+type channelKey struct {
+	session string
+	id      string
 }
 
-func newChannelRegistry(notify func(Notification)) *channelRegistry {
-	return &channelRegistry{notify: notify, channels: map[string]*hostChannel{}}
+// channelRegistry holds the open channels of one runtime. Each is reached
+// only by its own session and id, so frames never cross.
+type channelRegistry struct {
+	notify func(session string, n Notification)
+
+	mu       sync.Mutex
+	channels map[channelKey]*hostChannel
+}
+
+func newChannelRegistry(notify func(session string, n Notification)) *channelRegistry {
+	return &channelRegistry{notify: notify, channels: map[channelKey]*hostChannel{}}
 }
 
 // open registers a channel under the host's id. A second open with an id
-// that is still open is refused rather than silently replacing the first.
-func (r *channelRegistry) open(id string) (*hostChannel, error) {
+// that is still open in the same session is refused rather than silently
+// replacing the first.
+func (r *channelRegistry) open(session, id string) (*hostChannel, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if _, taken := r.channels[id]; taken {
+	key := channelKey{session: session, id: id}
+	if _, taken := r.channels[key]; taken {
 		return nil, fmt.Errorf("channel %s is already open", id)
 	}
-	c := &hostChannel{id: id, notify: r.notify, ended: r.forget}
-	r.channels[id] = c
+	c := &hostChannel{
+		id:      id,
+		session: session,
+		notify:  func(n Notification) { r.notify(session, n) },
+		ended:   r.forget,
+	}
+	r.channels[key] = c
 	return c, nil
 }
 
-func (r *channelRegistry) get(id string) *hostChannel {
+// get finds a channel of the caller's own session. An id that belongs to
+// another session is as absent as one that never existed.
+func (r *channelRegistry) get(session, id string) *hostChannel {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return r.channels[id]
+	return r.channels[channelKey{session: session, id: id}]
 }
 
 func (r *channelRegistry) forget(c *hostChannel) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if r.channels[c.id] == c {
-		delete(r.channels, c.id)
+	key := channelKey{session: c.session, id: c.id}
+	if r.channels[key] == c {
+		delete(r.channels, key)
 	}
 }
 
@@ -171,13 +193,24 @@ func (r *channelRegistry) size() int {
 	return len(r.channels)
 }
 
-// closeAll closes every open channel — on shutdown, or when the host's
-// wire is gone.
+// closeAll closes every open channel: the runtime is stopping, or the
+// one host's wire is gone.
 func (r *channelRegistry) closeAll() {
+	r.close(func(*hostChannel) bool { return true })
+}
+
+// closeSession closes the channels of one session: its host has left.
+func (r *channelRegistry) closeSession(session string) {
+	r.close(func(c *hostChannel) bool { return c.session == session })
+}
+
+func (r *channelRegistry) close(match func(*hostChannel) bool) {
 	r.mu.Lock()
 	open := make([]*hostChannel, 0, len(r.channels))
 	for _, c := range r.channels {
-		open = append(open, c)
+		if match(c) {
+			open = append(open, c)
+		}
 	}
 	r.mu.Unlock()
 	for _, c := range open {

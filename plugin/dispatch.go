@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"strings"
+	"sync"
 )
 
 // DispatchResult is the discriminated outcome of a single inbound
@@ -26,7 +27,8 @@ type StreamResult struct {
 }
 
 // ShutdownResult means: write Response back and signal the runtime
-// to stop accepting new requests.
+// to stop accepting new requests. Only a single-host Dispatcher (stdio)
+// returns it; over http a `shutdown` ends one session and is a ReplyResult.
 type ShutdownResult struct{ Response Response }
 
 func (ReplyResult) isDispatchResult()    {}
@@ -91,39 +93,104 @@ func capabilitiesOf(p BowirePlugin) map[string]bool {
 }
 
 // Dispatcher runs JSON-RPC requests against one plugin and holds what
-// outlives a single request: the open duplex channels. Both Run (stdio)
-// and RunHTTP route every inbound envelope through one, so contract
-// semantics live in one place.
+// outlives a single request: the open duplex channels and, when it serves
+// several hosts, the running streams. Both Run (stdio) and RunHTTP route
+// every inbound envelope through one, so contract semantics live in one
+// place.
+//
+// A session is one host. Over stdio the pipe is the host, so there is one
+// session and nothing names it. Over http a host names itself with the
+// SessionHeader, and what it starts belongs to that session: see
+// "Sessions over http" in the Bowire repo's
+// docs/architecture/sidecar-plugins.md.
 type Dispatcher struct {
-	plugin   BowirePlugin
+	plugin BowirePlugin
+	// hosts is true when the runtime outlives its hosts (http): `shutdown`
+	// then ends the caller's session instead of the runtime.
+	hosts    bool
 	channels *channelRegistry
+	streams  *streamRegistry
+	hookOnce sync.Once
 }
 
-// NewDispatcher builds a Dispatcher for p. notify is where channel frames
-// go — `$/channel/data` and `$/channel/closed` — and may be called from
-// any goroutine; the transport serialises it onto its wire.
+// NewDispatcher builds a Dispatcher for p on a wire with one host (stdio).
+// notify is where channel frames go — `$/channel/data` and
+// `$/channel/closed` — and may be called from any goroutine; the transport
+// serialises it onto its wire.
 func NewDispatcher(p BowirePlugin, notify func(Notification)) *Dispatcher {
-	return &Dispatcher{plugin: p, channels: newChannelRegistry(notify)}
+	return &Dispatcher{
+		plugin:   p,
+		channels: newChannelRegistry(func(_ string, n Notification) { notify(n) }),
+		streams:  newStreamRegistry(),
+	}
 }
 
-// CloseChannels closes every open channel. The runtimes call it when the
-// host's wire is gone; shutdown does it on its own.
-func (d *Dispatcher) CloseChannels() { d.channels.closeAll() }
+// NewSessionDispatcher builds a Dispatcher for p on a wire that several
+// hosts share (http). notify gets each channel frame together with the
+// session that owns the channel, and delivers it to that session only.
+func NewSessionDispatcher(p BowirePlugin, notify func(session string, n Notification)) *Dispatcher {
+	return &Dispatcher{
+		plugin:   p,
+		hosts:    true,
+		channels: newChannelRegistry(notify),
+		streams:  newStreamRegistry(),
+	}
+}
 
-// Dispatch runs a single JSON-RPC request and returns the
-// transport-agnostic outcome.
+// EndSession closes the channels of one session, so their OnClose handlers
+// run, and stops its streams. Every other session is left alone. Ending a
+// session that has nothing open, or ending one twice, does nothing.
+func (d *Dispatcher) EndSession(session string) {
+	d.channels.closeSession(session)
+	d.streams.stopSession(session)
+}
+
+// EndAllSessions closes every open channel and stops every stream. The
+// runtimes call it when they stop, and stdio when the host's wire is gone.
+func (d *Dispatcher) EndAllSessions() {
+	d.channels.closeAll()
+	d.streams.stopAll()
+}
+
+// RunShutdownHook calls the plugin's ShutdownHook, the first time only. The
+// runtimes call it when the sidecar itself stops; a host leaving over http
+// is not that.
+func (d *Dispatcher) RunShutdownHook(ctx context.Context) {
+	d.hookOnce.Do(func() {
+		if sh, ok := d.plugin.(ShutdownHook); ok {
+			_ = sh.Shutdown(ctx)
+		}
+	})
+}
+
+// Dispatch runs a single JSON-RPC request of the unnamed session: the one
+// host of a stdio wire, or an http request without the SessionHeader.
 func (d *Dispatcher) Dispatch(ctx context.Context, req Request) DispatchResult {
+	return d.DispatchFor(ctx, "", req)
+}
+
+// DispatchFor runs a single JSON-RPC request on behalf of session and
+// returns the transport-agnostic outcome. The session id is opaque: it is
+// compared, never parsed. The empty id is the unnamed session.
+func (d *Dispatcher) DispatchFor(ctx context.Context, session string, req Request) DispatchResult {
 	id := req.ID
 	p := d.plugin
 
 	switch req.Method {
 	case "shutdown":
-		// Every open channel ends first, so the host's read streams end
-		// before the process does.
-		d.channels.closeAll()
-		if sh, ok := p.(ShutdownHook); ok {
-			_ = sh.Shutdown(ctx)
+		if d.hosts {
+			// The host is leaving; the sidecar stays. An unnamed caller ends
+			// nothing: the unnamed session is shared by every host that sent
+			// no id, and there is no telling whose streams these would be.
+			if session != "" {
+				d.EndSession(session)
+			}
+			return ReplyResult{Response: okResponse(id, struct{}{})}
 		}
+		// The host owns the process and is stopping it. Every open channel
+		// ends first, so the host's read streams end before the process does.
+		d.channels.closeAll()
+		d.RunShutdownHook(ctx)
 		return ShutdownResult{Response: okResponse(id, struct{}{})}
 
 	case "initialize":
@@ -207,7 +274,15 @@ func (d *Dispatcher) Dispatch(ctx context.Context, req Request) DispatchResult {
 		if err != nil {
 			return ReplyResult{Response: errResponse(id, ErrInvalidParams, err.Error())}
 		}
-		stream, err := sp.InvokeStream(ctx, ip.toRequest(p))
+		var stream <-chan string
+		if d.hosts {
+			// The stream belongs to the caller's session and stops with it.
+			stream, err = d.streams.start(ctx, session, func(ctx context.Context) (<-chan string, error) {
+				return sp.InvokeStream(ctx, ip.toRequest(p))
+			})
+		} else {
+			stream, err = sp.InvokeStream(ctx, ip.toRequest(p))
+		}
 		if err != nil {
 			return ReplyResult{Response: errResponse(id, ErrInternal, err.Error())}
 		}
@@ -239,7 +314,7 @@ func (d *Dispatcher) Dispatch(ctx context.Context, req Request) DispatchResult {
 		if channelID == "" {
 			channelID = newStreamID()
 		}
-		channel, err := d.channels.open(channelID)
+		channel, err := d.channels.open(session, channelID)
 		if err != nil {
 			return ReplyResult{Response: errResponse(id, ErrInvalidParams, err.Error())}
 		}
@@ -265,7 +340,7 @@ func (d *Dispatcher) Dispatch(ctx context.Context, req Request) DispatchResult {
 		if err := unmarshalParams(req.Params, &cp); err != nil {
 			return ReplyResult{Response: errResponse(id, ErrInvalidParams, err.Error())}
 		}
-		channel := d.channels.get(cp.ChannelID)
+		channel := d.channels.get(session, cp.ChannelID)
 		if channel == nil || !channel.isOpen() {
 			return channelGone(id, cp.ChannelID)
 		}
@@ -277,7 +352,7 @@ func (d *Dispatcher) Dispatch(ctx context.Context, req Request) DispatchResult {
 		if err := unmarshalParams(req.Params, &cp); err != nil {
 			return ReplyResult{Response: errResponse(id, ErrInvalidParams, err.Error())}
 		}
-		channel := d.channels.get(cp.ChannelID)
+		channel := d.channels.get(session, cp.ChannelID)
 		if channel == nil {
 			return channelGone(id, cp.ChannelID)
 		}

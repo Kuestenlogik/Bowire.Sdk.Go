@@ -65,7 +65,9 @@ type IconPlugin interface {
 // StreamingPlugin is the optional capability for server-streaming
 // methods. The returned channel is owned by the plugin and must be
 // closed when the stream ends — the runtime emits a single
-// `$/stream/end` notification after the channel drains.
+// `$/stream/end` notification after the channel drains. Over http ctx is
+// done when the host that started the stream has left; stop producing and
+// close the channel then.
 type StreamingPlugin interface {
 	InvokeStream(ctx context.Context, req InvokeRequest) (<-chan string, error)
 }
@@ -79,9 +81,11 @@ type SettingsPlugin interface {
 	Settings() []PluginSetting
 }
 
-// ShutdownHook is the optional capability called once when the host
-// sends a `shutdown` request, after every open channel has closed. Use it
-// to release resources (open connections, file handles).
+// ShutdownHook is the optional capability called once when the sidecar
+// itself stops, after every open channel has closed: over stdio when the
+// host sends `shutdown` or closes stdin, over http when HTTPHandle.Close stops the server.
+// A host that leaves an http sidecar does not trigger it. Use it to release
+// resources (open connections, file handles).
 type ShutdownHook interface {
 	Shutdown(ctx context.Context) error
 }

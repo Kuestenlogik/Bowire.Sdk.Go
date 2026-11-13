@@ -59,3 +59,35 @@ func TestRunStdio_SkipsMalformedLines(t *testing.T) {
 		t.Errorf("want 2 lines (malformed dropped), got %d: %q", len(lines), out.String())
 	}
 }
+
+// hookPlugin counts how often the runtime tells it the sidecar is stopping.
+type hookPlugin struct {
+	testPlugin
+	shutdowns int
+}
+
+func (p *hookPlugin) Shutdown(context.Context) error {
+	p.shutdowns++
+	return nil
+}
+
+func TestRunStdio_RunsTheShutdownHookOnce(t *testing.T) {
+	cases := map[string]string{
+		// The host said so.
+		"shutdown": `{"jsonrpc":"2.0","id":1,"method":"shutdown"}` + "\n",
+		// The host is gone without a word: stdin closed.
+		"stdin closed": `{"jsonrpc":"2.0","id":1,"method":"ping"}` + "\n",
+	}
+	for name, input := range cases {
+		t.Run(name, func(t *testing.T) {
+			p := &hookPlugin{}
+			var out bytes.Buffer
+			if err := runWithIO(context.Background(), p, strings.NewReader(input), &out); err != nil {
+				t.Fatalf("runWithIO: %v", err)
+			}
+			if p.shutdowns != 1 {
+				t.Fatalf("want the hook to run once, ran %d times", p.shutdowns)
+			}
+		})
+	}
+}

@@ -61,7 +61,7 @@ interfaces — idiomatic Go:
 | Server streaming | `StreamingPlugin` | gRPC server-streaming, Watch, &c       |
 | Duplex channels  | `ChannelPlugin`   | WebSocket, SignalR, MQTT, …            |
 | User settings    | `SettingsPlugin`  | Connection URLs, credentials, options  |
-| Shutdown hook    | `ShutdownHook`    | Releasing open connections cleanly     |
+| Shutdown hook    | `ShutdownHook`    | Releasing resources when the sidecar stops |
 
 The dispatcher discovers capabilities at runtime via type
 assertions — a plugin implements only what it actually supports, and
@@ -173,8 +173,9 @@ func (EchoPlugin) OpenChannel(_ context.Context, req plugin.ChannelRequest, ch p
   `plugin.ErrChannelClosed` once the channel has closed.
 - `Close` closes from the plugin's side. Whichever side closes, the
   `OnClose` handlers run once (they may still `Send` a last frame), then
-  `$/channel/closed` ends the host's read stream. Shutdown, and stdin
-  closing, end every channel still open.
+  `$/channel/closed` ends the host's read stream. Over stdio, `shutdown`
+  and stdin closing end every channel still open. Over http a host that
+  leaves ends its own channels only, see [Sessions](#sessions).
 - An error from `OpenChannel` refuses the open.
 
 ## Transports
@@ -209,6 +210,32 @@ onto (`$/stream/data`, `$/stream/end`, `$/channel/data`,
 multi-tenant deployments where one sidecar serves many workbenches.
 
 `net/http` standard-library only — zero runtime dependencies.
+
+#### Sessions
+
+One http sidecar serves several hosts at once. A host names itself with
+an opaque id in the `Bowire-Session` request header
+(`plugin.SessionHeader`), on every `POST` and on the SSE `GET`. The
+runtime keeps the hosts apart by that id; a plugin needs no code for it.
+
+- A stream started by `invokeStream` and a channel opened by
+  `openChannel` belong to the session of the request that started them.
+  Their notifications go to that session's SSE streams only.
+- `channel.send` and `channel.close` reach only a channel of the caller's
+  own session. Any other id gets the "channel is closed" error.
+- A session ends when its host POSTs `shutdown`, or when its last SSE
+  stream closes. The runtime then closes that session's channels (the
+  `OnClose` handlers run) and stops its streams: the `ctx` handed to
+  `InvokeStream` is done, and `$/stream/end` goes out. Every other
+  session carries on.
+- Requests without the header form one unnamed session. Its notifications
+  go to every SSE stream that also sent no header. A `shutdown` without
+  the header is acknowledged and ends nothing.
+
+The `ShutdownHook` is not a session event. It runs once, when the sidecar
+itself stops: over stdio when the host sends `shutdown`, over http when
+`handle.Close` stops the server. A host that leaves an http sidecar does
+not trigger it.
 
 ## Wire model
 
